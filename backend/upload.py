@@ -1,5 +1,6 @@
 import os
 import uuid
+from backend.services.viral_finder import find_viral_moments
 from backend.services.transcription import transcribe_video
 from pathlib import Path
 
@@ -94,6 +95,33 @@ async def transcribe_uploaded_video(filename: str):
         result = transcribe_video(str(video_path))
 
         return result
+
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@router.get("/find-moments/{filename}")
+async def find_moments(filename: str, max_clips: int = 12):
+
+    if max_clips < 1 or max_clips > 20:
+        raise HTTPException(
+            status_code=400, detail="max_clips must be between 1 and 20"
+        )
+
+    video_path = (UPLOAD_DIR / filename).resolve()
+
+    if video_path.parent != UPLOAD_DIR.resolve():
+        raise HTTPException(status_code=400, detail="Invalid filename")
+
+    if not video_path.is_file():
+        raise HTTPException(status_code=404, detail="Video not found")
+
+    try:
+        transcript = transcribe_video(str(video_path))
+
+        result = find_viral_moments(transcript["segments"], max_clips=max_clips)
+
+        return {"success": True, "language": transcript["language"], "analysis": result}
 
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
