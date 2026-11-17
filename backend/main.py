@@ -1,11 +1,15 @@
 from fastapi import FastAPI
 from datetime import datetime
 
+from backend.upload import router as upload_router
+
 app = FastAPI(
     title="ClipPilot AI",
     description="AI Automated Video Clipping System",
     version="1.0.0",
 )
+
+app.include_router(upload_router, prefix="/api/videos", tags=["Video Upload"])
 
 
 @app.get("/")
