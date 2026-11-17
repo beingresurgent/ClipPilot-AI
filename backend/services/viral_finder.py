@@ -1,97 +1,68 @@
 import re
 
 HOOK_WORDS = [
-    "secret",
-    "truth",
-    "never",
-    "why",
-    "how",
-    "shocking",
-    "danger",
-    "mistake",
-    "because",
-    "impossible",
-    "revealed",
-    "warning",
-    "surprising",
-    "hidden",
-    "important",
-    "amazing",
-    "crazy",
-    "insane",
-    "worst",
-    "best",
-    "unbelievable",
-    "surprise",
-    "finally",
-    "epic",
+    "secret", "truth", "never", "why", "how", "shocking",
+    "danger", "mistake", "because", "impossible", "revealed",
+    "warning", "surprising", "hidden", "important", "amazing",
+    "crazy", "insane", "worst", "best", "unbelievable",
+    "surprise", "finally", "epic", "betrayal", "attack",
+    "escape", "death", "mission", "enemy", "explosion"
+]
+
+CURIOSITY_PHRASES = [
+    "what happened", "you won't believe", "the truth",
+    "guess what", "but wait", "how did", "why is",
+    "what if", "find out", "what they are hiding"
+]
+
+EMOTION_WORDS = [
+    "amazing", "crazy", "insane", "unbelievable",
+    "terrifying", "shocking", "funny", "incredible",
+    "dangerous", "secret", "impossible", "epic",
+    "killed", "attack", "enemy", "explosion"
 ]
 
 
 def score_moment(text):
     text_lower = text.lower().strip()
-    words = text_lower.split()
+    words = re.findall(r"\b[\w']+\b", text_lower)
 
     if not words:
         return 0
 
     score = 20
 
-    hook_matches = sum(
-        1
+    hooks = sum(
+        bool(re.search(r"\b" + re.escape(word) + r"\b", text_lower))
         for word in HOOK_WORDS
-        if re.search(r"\b" + re.escape(word) + r"\b", text_lower)
     )
-    score += min(hook_matches * 7, 28)
+    score += min(hooks * 6, 24)
 
-    curiosity_phrases = [
-        "what happened",
-        "you won't believe",
-        "the truth",
-        "guess what",
-        "but wait",
-        "how did",
-        "why is",
-        "what if",
-    ]
-
-    if any(phrase in text_lower for phrase in curiosity_phrases):
-        score += 12
-
-    emotion_words = [
-        "amazing",
-        "crazy",
-        "insane",
-        "unbelievable",
-        "terrifying",
-        "shocking",
-        "funny",
-        "incredible",
-        "dangerous",
-        "secret",
-        "impossible",
-        "epic",
-    ]
-
-    emotion_matches = sum(
-        1
-        for word in emotion_words
-        if re.search(r"\b" + re.escape(word) + r"\b", text_lower)
+    curiosity = sum(
+        phrase in text_lower for phrase in CURIOSITY_PHRASES
     )
-    score += min(emotion_matches * 5, 15)
+    score += min(curiosity * 10, 20)
+
+    emotion = sum(
+        bool(re.search(r"\b" + re.escape(word) + r"\b", text_lower))
+        for word in EMOTION_WORDS
+    )
+    score += min(emotion * 4, 16)
 
     if "?" in text:
-        score += 8
+        score += 7
 
     if "!" in text:
         score += 5
 
-    if 8 <= len(words) <= 35:
+    if 8 <= len(words) <= 45:
         score += 10
     elif len(words) < 5:
         score -= 10
 
-    if text_lower.endswith(("and", "but", "or", "because", "with", "to")):
+    if text_lower.endswith(
+        ("and", "but", "or", "because", "with", "to")
+    ):
         score -= 5
 
     return max(0, min(round(score), 100))
@@ -117,106 +88,159 @@ def find_viral_moments(
     if not min_duration <= custom_duration <= max_duration:
         raise ValueError("custom_duration is outside allowed limits")
 
-    if not segments:
-        return {
-            "total_candidates": 0,
-            "requested_clips": max_clips,
-            "selected_clips": 0,
-            "duration_mode": duration_mode,
-            "moments": [],
-        }
+    segments = sorted(
+        segments or [],
+        key=lambda s: float(s["start"])
+    )
 
-    segments = sorted(segments, key=lambda s: float(s["start"]))
+    video_end = max(
+        (float(s["end"]) for s in segments),
+        default=0
+    )
 
-    video_end = max(float(s["end"]) for s in segments)
-
-    target = custom_duration if duration_mode == "custom" else min(30, max_duration)
+    empty_result = {
+        "total_candidates": 0,
+        "requested_clips": max_clips,
+        "selected_clips": 0,
+        "duration_mode": duration_mode,
+        "moments": [],
+    }
 
     if video_end < min_duration:
-        return {
-            "total_candidates": 0,
-            "requested_clips": max_clips,
-            "selected_clips": 0,
-            "duration_mode": duration_mode,
-            "moments": [],
-        }
+        return empty_result
 
-    clip_duration = min(target, video_end)
+    if duration_mode == "custom":
+        durations = [custom_duration]
+    else:
+        # Automatically test different clip lengths.
+        durations = [
+            min_duration, 20, 25, 30, 35, 40, 45, 50, max_duration
+        ]
+        durations = sorted(set(
+            d for d in durations
+            if min_duration <= d <= max_duration
+            and d <= video_end
+        ))
 
-    # Generate overlapping candidate windows.
-    # Final selection will remove overlapping clips.
-    step = max(1, clip_duration / 2)
-
-    starts = []
-    position = 0.0
-
-    while position + clip_duration <= video_end:
-        starts.append(position)
-        position += step
-
-    # Ensure the final part of the video is also checked.
-    final_start = max(0, video_end - clip_duration)
-    starts.append(final_start)
-
-    # Remove duplicate start positions.
-    starts = sorted(set(round(s, 2) for s in starts))
+        if not durations:
+            durations = [min(video_end, max_duration)]
 
     candidates = []
+    seen = set()
 
-    for start in starts:
-        end = min(start + clip_duration, video_end)
-        duration = end - start
-
-        if duration < min_duration:
+    for clip_duration in durations:
+        if clip_duration > video_end:
             continue
 
-        text_parts = []
-        segment_scores = []
+        max_start = max(0, video_end - clip_duration)
+
+        # Check regular windows and transcript-aligned starts.
+        starts = set()
+        position = 0.0
+
+        while position <= max_start:
+            starts.add(round(position, 2))
+            position += 5
+
+        starts.add(round(max_start, 2))
 
         for segment in segments:
             segment_start = float(segment["start"])
-            segment_end = float(segment["end"])
 
-            if segment_start < end and segment_end > start:
+            for proposed in (
+                segment_start,
+                segment_start - 2,
+                segment_start - clip_duration / 2
+            ):
+                starts.add(round(
+                    max(0, min(proposed, max_start)), 2
+                ))
+
+        for start in sorted(starts):
+            end = min(start + clip_duration, video_end)
+            key = (round(start, 2), round(end, 2))
+
+            if key in seen:
+                continue
+            seen.add(key)
+
+            text_parts = []
+            weighted_scores = []
+            speech_time = 0.0
+
+            for segment in segments:
+                seg_start = float(segment["start"])
+                seg_end = float(segment["end"])
+
+                overlap = max(
+                    0,
+                    min(end, seg_end) - max(start, seg_start)
+                )
+
+                if overlap <= 0:
+                    continue
+
                 text = segment.get("text", "").strip()
 
-                if text:
-                    text_parts.append(text)
-                    segment_scores.append(score_moment(text))
+                if not text:
+                    continue
 
-        combined_text = " ".join(text_parts).strip()
+                text_parts.append(text)
+                weighted_scores.append(
+                    (score_moment(text), overlap)
+                )
+                speech_time += overlap
 
-        if len(combined_text.split()) < 8:
-            continue
+            combined_text = " ".join(text_parts).strip()
+            word_count = len(combined_text.split())
 
-        average_score = (
-            sum(segment_scores) / len(segment_scores) if segment_scores else 0
-        )
+            if word_count < 5 or not weighted_scores:
+                continue
 
-        if duration_mode == "auto":
-            score_adjusted = average_score - abs(duration - 30) * 0.3
-        else:
-            score_adjusted = average_score
+            total_weight = sum(
+                weight for _, weight in weighted_scores
+            )
 
-        candidates.append(
-            {
+            average_score = sum(
+                score * weight
+                for score, weight in weighted_scores
+            ) / total_weight
+
+            speech_density = min(
+                speech_time / max(end - start, 1), 1
+            )
+
+            # Reward meaningful speech without over-rewarding
+            # long clips or dense transcripts.
+            final_score = (
+                average_score * 0.80
+                + speech_density * 12
+            )
+
+            if duration_mode == "auto":
+                final_score -= max(0, clip_duration - 35) * 0.12
+
+            candidates.append({
                 "start": round(start, 2),
                 "end": round(end, 2),
-                "duration": round(duration, 2),
+                "duration": round(end - start, 2),
                 "text": combined_text,
-                "score": round(max(0, min(score_adjusted, 100)), 2),
-            }
-        )
+                "score": round(
+                    max(0, min(final_score, 100)), 2
+                ),
+            })
 
-    # Rank candidates by score.
-    candidates.sort(key=lambda item: item["score"], reverse=True)
+    candidates.sort(
+        key=lambda item: item["score"],
+        reverse=True
+    )
 
-    # Select only non-overlapping clips.
     selected = []
 
     for candidate in candidates:
         overlaps = any(
-            candidate["start"] < item["end"] and candidate["end"] > item["start"]
+            candidate["start"] < item["end"]
+            and candidate["end"] > item["start"]
             for item in selected
         )
 
