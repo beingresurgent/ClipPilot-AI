@@ -69,61 +69,84 @@ def find_viral_moments(
             "moments": [],
         }
 
-    segments = sorted(segments, key=lambda s: s["start"])
-
+    segments = sorted(segments, key=lambda s: float(s["start"]))
     video_end = max(float(s["end"]) for s in segments)
+
+    target = custom_duration if duration_mode == "custom" else min(30, max_duration)
+
+    # Source footage must be long enough.
+    if video_end < min_duration:
+        return {
+            "total_candidates": 0,
+            "requested_clips": max_clips,
+            "selected_clips": 0,
+            "duration_mode": duration_mode,
+            "moments": [],
+        }
+
+    # If the source is shorter than the requested duration,
+    # use the available footage, provided it meets min_duration.
+    clip_duration = min(target, video_end)
+
     candidates = []
 
-    for index, segment in enumerate(segments):
-        start = float(segment["start"])
+    for segment in segments:
+        segment_start = float(segment["start"])
+
+        # Keep some context before the interesting moment.
+        start = max(0, segment_start - clip_duration * 0.25)
+
+        # Keep the complete clip inside the available timeline.
+        end = start + clip_duration
+
+        if end > video_end:
+            end = video_end
+            start = max(0, end - clip_duration)
+
+        if end - start < min_duration:
+            continue
+
         text_parts = []
-        last_end = start
         score = 0
 
-        for current in segments[index:]:
+        for current in segments:
             current_start = float(current["start"])
             current_end = float(current["end"])
 
-            if current_start - last_end > 2.0:
-                break
+            if current_start < end and current_end > start:
+                text = current.get("text", "").strip()
 
-            if duration_mode == "custom":
-                target = custom_duration
-            else:
-                target = 30
+                if text:
+                    text_parts.append(text)
+                    score += score_moment(text)
 
-            if current_end - start > target:
-                break
+        combined_text = " ".join(text_parts).strip()
 
-            text_parts.append(current["text"].strip())
-            score += score_moment(current["text"])
-            last_end = current_end
+        if len(combined_text.split()) < 8:
+            continue
 
-            duration = last_end - start
-            text = " ".join(text_parts).strip()
+        candidates.append(
+            {
+                "start": round(start, 2),
+                "end": round(end, 2),
+                "duration": round(end - start, 2),
+                "text": combined_text,
+                "score": round(min(score, 100), 2),
+            }
+        )
 
-            if duration < min_duration:
-                continue
+    # Remove duplicate windows.
+    unique_candidates = {}
 
-            if len(text.split()) < 8:
-                continue
+    for candidate in candidates:
+        key = (candidate["start"], candidate["end"])
 
-            if duration_mode == "auto":
-                ideal_duration = 30
-                score_adjusted = score - abs(duration - ideal_duration) * 0.3
-            else:
-                score_adjusted = score
+        if key not in unique_candidates:
+            unique_candidates[key] = candidate
+        elif candidate["score"] > unique_candidates[key]["score"]:
+            unique_candidates[key] = candidate
 
-            candidates.append(
-                {
-                    "start": round(start, 2),
-                    "end": round(last_end, 2),
-                    "duration": round(duration, 2),
-                    "text": text,
-                    "score": round(min(score_adjusted, 100), 2),
-                }
-            )
-
+    candidates = list(unique_candidates.values())
     candidates.sort(key=lambda item: item["score"], reverse=True)
 
     selected = []
