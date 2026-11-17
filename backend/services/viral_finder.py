@@ -13,31 +13,88 @@ HOOK_WORDS = [
     "impossible",
     "revealed",
     "warning",
-    "but",
     "surprising",
     "hidden",
     "important",
+    "amazing",
+    "crazy",
+    "insane",
+    "worst",
+    "best",
+    "unbelievable",
+    "surprise",
+    "finally",
+    "epic",
 ]
 
 
 def score_moment(text):
-    text_lower = text.lower()
-    score = 30
+    text_lower = text.lower().strip()
+    words = text_lower.split()
 
-    for word in HOOK_WORDS:
-        if re.search(r"\b" + re.escape(word) + r"\b", text_lower):
-            score += 8
+    if not words:
+        return 0
 
-    if "?" in text:
+    score = 20
+
+    hook_matches = sum(
+        1
+        for word in HOOK_WORDS
+        if re.search(r"\b" + re.escape(word) + r"\b", text_lower)
+    )
+    score += min(hook_matches * 7, 28)
+
+    curiosity_phrases = [
+        "what happened",
+        "you won't believe",
+        "the truth",
+        "guess what",
+        "but wait",
+        "how did",
+        "why is",
+        "what if",
+    ]
+
+    if any(phrase in text_lower for phrase in curiosity_phrases):
         score += 12
 
-    if "!" in text:
+    emotion_words = [
+        "amazing",
+        "crazy",
+        "insane",
+        "unbelievable",
+        "terrifying",
+        "shocking",
+        "funny",
+        "incredible",
+        "dangerous",
+        "secret",
+        "impossible",
+        "epic",
+    ]
+
+    emotion_matches = sum(
+        1
+        for word in emotion_words
+        if re.search(r"\b" + re.escape(word) + r"\b", text_lower)
+    )
+    score += min(emotion_matches * 5, 15)
+
+    if "?" in text:
         score += 8
 
-    if len(text.split()) >= 12:
-        score += 10
+    if "!" in text:
+        score += 5
 
-    return min(score, 100)
+    if 8 <= len(words) <= 35:
+        score += 10
+    elif len(words) < 5:
+        score -= 10
+
+    if text_lower.endswith(("and", "but", "or", "because", "with", "to")):
+        score -= 5
+
+    return max(0, min(round(score), 100))
 
 
 def find_viral_moments(
@@ -70,11 +127,11 @@ def find_viral_moments(
         }
 
     segments = sorted(segments, key=lambda s: float(s["start"]))
+
     video_end = max(float(s["end"]) for s in segments)
 
     target = custom_duration if duration_mode == "custom" else min(30, max_duration)
 
-    # Source footage must be long enough.
     if video_end < min_duration:
         return {
             "total_candidates": 0,
@@ -84,71 +141,77 @@ def find_viral_moments(
             "moments": [],
         }
 
-    # If the source is shorter than the requested duration,
-    # use the available footage, provided it meets min_duration.
     clip_duration = min(target, video_end)
+
+    # Generate overlapping candidate windows.
+    # Final selection will remove overlapping clips.
+    step = max(1, clip_duration / 2)
+
+    starts = []
+    position = 0.0
+
+    while position + clip_duration <= video_end:
+        starts.append(position)
+        position += step
+
+    # Ensure the final part of the video is also checked.
+    final_start = max(0, video_end - clip_duration)
+    starts.append(final_start)
+
+    # Remove duplicate start positions.
+    starts = sorted(set(round(s, 2) for s in starts))
 
     candidates = []
 
-    for segment in segments:
-        segment_start = float(segment["start"])
+    for start in starts:
+        end = min(start + clip_duration, video_end)
+        duration = end - start
 
-        # Keep some context before the interesting moment.
-        start = max(0, segment_start - clip_duration * 0.25)
-
-        # Keep the complete clip inside the available timeline.
-        end = start + clip_duration
-
-        if end > video_end:
-            end = video_end
-            start = max(0, end - clip_duration)
-
-        if end - start < min_duration:
+        if duration < min_duration:
             continue
 
         text_parts = []
-        score = 0
+        segment_scores = []
 
-        for current in segments:
-            current_start = float(current["start"])
-            current_end = float(current["end"])
+        for segment in segments:
+            segment_start = float(segment["start"])
+            segment_end = float(segment["end"])
 
-            if current_start < end and current_end > start:
-                text = current.get("text", "").strip()
+            if segment_start < end and segment_end > start:
+                text = segment.get("text", "").strip()
 
                 if text:
                     text_parts.append(text)
-                    score += score_moment(text)
+                    segment_scores.append(score_moment(text))
 
         combined_text = " ".join(text_parts).strip()
 
         if len(combined_text.split()) < 8:
             continue
 
+        average_score = (
+            sum(segment_scores) / len(segment_scores) if segment_scores else 0
+        )
+
+        if duration_mode == "auto":
+            score_adjusted = average_score - abs(duration - 30) * 0.3
+        else:
+            score_adjusted = average_score
+
         candidates.append(
             {
                 "start": round(start, 2),
                 "end": round(end, 2),
-                "duration": round(end - start, 2),
+                "duration": round(duration, 2),
                 "text": combined_text,
-                "score": round(min(score, 100), 2),
+                "score": round(max(0, min(score_adjusted, 100)), 2),
             }
         )
 
-    # Remove duplicate windows.
-    unique_candidates = {}
-
-    for candidate in candidates:
-        key = (candidate["start"], candidate["end"])
-
-        if key not in unique_candidates:
-            unique_candidates[key] = candidate
-        elif candidate["score"] > unique_candidates[key]["score"]:
-            unique_candidates[key] = candidate
-
-    candidates = list(unique_candidates.values())
+    # Rank candidates by score.
     candidates.sort(key=lambda item: item["score"], reverse=True)
 
+    # Select only non-overlapping clips.
     selected = []
 
     for candidate in candidates:
