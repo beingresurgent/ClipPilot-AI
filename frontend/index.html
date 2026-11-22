@@ -1,0 +1,246 @@
+<!DOCTYPE html>
+<html lang="en">
+
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width,initial-scale=1">
+    <title>ClipPilot AI</title>
+    <style>
+        * {
+            box-sizing: border-box
+        }
+
+        body {
+            margin: 0;
+            background: #0b1020;
+            color: #eee;
+            font: 15px Arial
+        }
+
+        header,
+        .card {
+            background: #111827;
+            padding: 22px;
+            border: 1px solid #263248;
+            border-radius: 12px;
+            margin: 20px
+        }
+
+        header {
+            border-radius: 0;
+            margin: 0
+        }
+
+        main {
+            max-width: 1200px;
+            margin: auto
+        }
+
+        h2 {
+            margin-top: 0
+        }
+
+        button,
+        input,
+        select {
+            padding: 10px;
+            border-radius: 7px;
+            border: 1px solid #374151
+        }
+
+        button {
+            background: #6366f1;
+            color: white;
+            border: 0;
+            cursor: pointer;
+            margin: 4px
+        }
+
+        button:disabled {
+            opacity: .45;
+            cursor: not-allowed
+        }
+
+        input,
+        select {
+            background: #0b1020;
+            color: white
+        }
+
+        .row {
+            display: flex;
+            flex-wrap: wrap;
+            gap: 12px;
+            align-items: center
+        }
+
+        .status,
+        pre {
+            background: #0b1020;
+            padding: 12px;
+            border-radius: 8px;
+            overflow: auto
+        }
+
+        .grid {
+            display: grid;
+            grid-template-columns: repeat(auto-fit, minmax(280px, 1fr));
+            gap: 15px
+        }
+
+        .clip {
+            background: #111827;
+            border: 1px solid #334155;
+            border-radius: 12px;
+            overflow: hidden
+        }
+
+        video {
+            width: 100%;
+            background: black
+        }
+
+        .info {
+            padding: 15px
+        }
+
+        .hidden {
+            display: none
+        }
+    </style>
+</head>
+
+<body>
+    <header>
+        <h1>🎬 ClipPilot AI</h1>
+        <p>AI Video Clipping Studio</p>
+    </header>
+    <main>
+
+        <section class="card">
+            <h2>Upload Video</h2>
+            <div class="row">
+                <input type="file" id="file" accept="video/*">
+                <button id="upload" disabled>Upload</button>
+            </div>
+            <div id="uploadStatus" class="status">Select a video.</div>
+        </section>
+
+        <section class="card">
+            <h2>Clip Settings</h2>
+            <div class="row">
+                <label>Clips <input id="count" type="number" min="1" max="20" value="5"></label>
+                <label>Mode <select id="mode">
+                        <option>auto</option>
+                        <option>custom</option>
+                    </select></label>
+                <label id="customBox" class="hidden">Custom duration <input id="custom" type="number"
+                        value="30"></label>
+                <label>Min <input id="min" type="number" value="15"></label>
+                <label>Max <input id="max" type="number" value="60"></label>
+            </div>
+        </section>
+
+        <section class="card">
+            <h2>AI Processing</h2>
+            <div class="row">
+                <button id="analyze" disabled>Analyze</button>
+                <button id="transcribe" disabled>Transcribe</button>
+                <button id="moments" disabled>Find Moments</button>
+                <button id="generate" disabled>Generate Clips</button>
+            </div>
+            <div id="status" class="status">Upload a video to begin.</div>
+        </section>
+
+        <section class="card">
+            <h2>Analysis</h2>
+            <pre id="analysis">—</pre>
+            <h2>Transcription</h2>
+            <pre id="transcript">—</pre>
+            <h2>Viral Moments</h2>
+            <pre id="momentResult">—</pre>
+        </section>
+
+        <section class="card">
+            <h2>Generated Clips</h2>
+            <button id="downloadAll" disabled>Download All</button>
+            <div id="clipStatus" class="status">No clips yet.</div>
+            <div id="clips" class="grid"></div>
+        </section>
+
+    </main>
+
+    <script>
+        const API = "http://127.0.0.1:8000";
+        const $ = id => document.getElementById(id);
+        let filename = "", results = [];
+
+        $("file").onchange = () => $("upload").disabled = !$("file").files.length;
+        $("mode").onchange = () => $("customBox").classList.toggle("hidden", $("mode").value !== "custom");
+
+        $("upload").onclick = async () => {
+            const form = new FormData(); form.append("file", $("file").files[0]);
+            $("uploadStatus").textContent = "Uploading...";
+            try {
+                const r = await fetch(`${API}/api/videos/upload`, { method: "POST", body: form });
+                const d = await r.json(); if (!r.ok || !d.success) throw Error(JSON.stringify(d));
+                filename = d.filename || d.saved_filename;
+                $("uploadStatus").textContent = `Uploaded: ${filename}`;
+                ["analyze", "transcribe", "moments", "generate"].forEach(id => $(id).disabled = false);
+            } catch (e) { $("uploadStatus").textContent = e.message }
+        };
+
+        async function get(endpoint, output, label, button) {
+            button.disabled = true; $("status").textContent = `${label}...`;
+            try {
+                const r = await fetch(`${API}${endpoint}${encodeURIComponent(filename)}`);
+                const d = await r.json(); if (!r.ok) throw Error(JSON.stringify(d));
+                $(output).textContent = JSON.stringify(d, null, 2);
+                $("status").textContent = `${label} complete`;
+                return d;
+            } catch (e) { $("status").textContent = e.message }
+            finally { button.disabled = false }
+        }
+
+        $("analyze").onclick = () => get("/api/videos/analyze/", "analysis", "Analyzing", $("analyze"));
+        $("transcribe").onclick = () => get("/api/videos/transcribe/", "transcript", "Transcribing", $("transcribe"));
+        $("moments").onclick = () => get("/api/videos/find-moments/", "momentResult", "Finding moments", $("moments"));
+
+        $("generate").onclick = async () => {
+            $("generate").disabled = true; $("clipStatus").textContent = "Generating clips...";
+            const body = {
+                max_clips: +$("count").value, keep_original_audio: true,
+                duration_mode: $("mode").value, custom_duration: +$("custom").value,
+                min_duration: +$("min").value, max_duration: +$("max").value
+            };
+            try {
+                const r = await fetch(`${API}/api/videos/generate-multiple-clips/${encodeURIComponent(filename)}`, {
+                    method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(body)
+                });
+                const d = await r.json(); if (!r.ok || !d.success) throw Error(JSON.stringify(d));
+                results = d.clips || []; $("clipStatus").textContent = `Generated ${d.generated_clips}/${d.requested_clips}`;
+                $("clips").innerHTML = results.filter(c => c.success).map((c, i) => `
+      <article class="clip">
+        <video controls playsinline preload="metadata" src="${API}/clips/${encodeURIComponent(c.filename)}"></video>
+        <div class="info">
+          <h3>Clip ${i + 1} · Score ${c.score ?? "—"}</h3>
+          <p>${c.duration}s · ${c.encoder} · Audio ${c.original_audio ? "✓" : "—"}</p>
+          <p>${c.text || ""}</p>
+          <a href="${API}/clips/${encodeURIComponent(c.filename)}" download="${c.filename}">
+            <button>Download Clip</button>
+          </a>
+        </div>
+      </article>`).join("");
+                $("downloadAll").disabled = !results.length;
+                $("status").textContent = "Generation complete";
+            } catch (e) { $("clipStatus").textContent = e.message }
+            finally { $("generate").disabled = false }
+        };
+
+        $("downloadAll").onclick = () => results.filter(c => c.success).forEach((c, i) => {
+            setTimeout(() => { const a = document.createElement("a"); a.href = `${API}/clips/${encodeURIComponent(c.filename)}`; a.download = c.filename; a.click() }, i * 700)
+        });
+    </script>
+</body>
+
+</html>

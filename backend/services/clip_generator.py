@@ -21,7 +21,7 @@ def generate_clip(video_path, start, end, keep_original_audio=True):
     output_name = f"clip_{uuid.uuid4().hex[:10]}.mp4"
     output_path = CLIPS_DIR / output_name
 
-    command = [
+    base_command = [
         "ffmpeg",
         "-y",
         "-ss",
@@ -35,27 +35,68 @@ def generate_clip(video_path, start, end, keep_original_audio=True):
     ]
 
     if keep_original_audio:
-        command += ["-map", "0:a:0?"]
+        base_command += ["-map", "0:a:0?"]
     else:
-        command += ["-an"]
+        base_command += ["-an"]
 
-    command += [
+    # First try NVIDIA GPU encoder
+    nvenc_command = base_command + [
+        "-c:v",
+        "h264_nvenc",
+        "-preset",
+        "p4",
+        "-cq",
+        "23",
+        "-b:v",
+        "0",
+        "-pix_fmt",
+        "yuv420p",
+    ]
+
+    if keep_original_audio:
+        nvenc_command += ["-c:a", "aac", "-b:a", "128k"]
+
+    nvenc_command += ["-movflags", "+faststart", str(output_path)]
+
+    # CPU fallback if NVIDIA encoding fails
+    cpu_command = base_command + [
         "-c:v",
         "libx264",
         "-preset",
         "veryfast",
         "-crf",
         "23",
+        "-pix_fmt",
+        "yuv420p",
     ]
 
     if keep_original_audio:
-        command += ["-c:a", "aac", "-b:a", "128k"]
+        cpu_command += ["-c:a", "aac", "-b:a", "128k"]
 
-    command += ["-movflags", "+faststart", str(output_path)]
+    cpu_command += ["-movflags", "+faststart", str(output_path)]
 
-    result = subprocess.run(command, capture_output=True, text=True)
+    result = subprocess.run(
+        nvenc_command,
+        capture_output=True,
+        text=True,
+    )
+
+    encoder_used = "h264_nvenc"
 
     if result.returncode != 0:
+        # Remove any incomplete output before CPU fallback
+        output_path.unlink(missing_ok=True)
+
+        result = subprocess.run(
+            cpu_command,
+            capture_output=True,
+            text=True,
+        )
+
+        encoder_used = "libx264"
+
+    if result.returncode != 0:
+        output_path.unlink(missing_ok=True)
         raise RuntimeError(result.stderr[-2000:])
 
     return {
@@ -64,4 +105,5 @@ def generate_clip(video_path, start, end, keep_original_audio=True):
         "path": str(output_path),
         "original_audio": keep_original_audio,
         "duration": round(end - start, 2),
+        "encoder": encoder_used,
     }
