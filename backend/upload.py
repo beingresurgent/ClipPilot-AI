@@ -1,12 +1,11 @@
-import os
 import uuid
+from pathlib import Path
+
+from fastapi import APIRouter, File, HTTPException, UploadFile
+
 from backend.services.clip_generator import generate_clip
 from backend.services.viral_finder import find_viral_moments
 from backend.services.transcription import transcribe_video
-from pathlib import Path
-
-from fastapi import APIRouter, UploadFile, File, HTTPException
-
 from backend.video_analyzer import analyze_video
 
 router = APIRouter()
@@ -15,22 +14,39 @@ UPLOAD_DIR = Path("storage/uploads")
 UPLOAD_DIR.mkdir(parents=True, exist_ok=True)
 
 ALLOWED_EXTENSIONS = {".mp4", ".mov", ".mkv", ".avi"}
-MAX_FILE_SIZE = 2 * 1024 * 1024 * 1024  # 2 GB
+MAX_FILE_SIZE = 2 * 1024 * 1024 * 1024
+FORMATS = {"landscape", "vertical"}
+
+
+def get_video_path(filename):
+    path = (UPLOAD_DIR / filename).resolve()
+
+    if path.parent != UPLOAD_DIR.resolve():
+        raise HTTPException(status_code=400, detail="Invalid filename")
+
+    if not path.is_file():
+        raise HTTPException(status_code=404, detail="Video not found")
+
+    return path
+
+
+def validate_format(output_format):
+    if output_format not in FORMATS:
+        raise HTTPException(status_code=400, detail="Invalid output format")
 
 
 @router.post("/upload")
 async def upload_video(file: UploadFile = File(...)):
-
     extension = Path(file.filename or "").suffix.lower()
 
     if extension not in ALLOWED_EXTENSIONS:
         raise HTTPException(
-            status_code=400, detail="Only MP4, MOV, MKV and AVI videos are allowed"
+            status_code=400,
+            detail="Only MP4, MOV, MKV and AVI videos are allowed",
         )
 
     filename = f"{uuid.uuid4().hex}{extension}"
     file_path = UPLOAD_DIR / filename
-
     size = 0
 
     try:
@@ -40,7 +56,8 @@ async def upload_video(file: UploadFile = File(...)):
 
                 if size > MAX_FILE_SIZE:
                     raise HTTPException(
-                        status_code=413, detail="Maximum file size is 2 GB"
+                        status_code=413,
+                        detail="Maximum file size is 2 GB",
                     )
 
                 buffer.write(chunk)
@@ -63,92 +80,74 @@ async def upload_video(file: UploadFile = File(...)):
 
 @router.get("/analyze/{filename}")
 async def analyze_uploaded_video(filename: str):
-
-    video_path = (UPLOAD_DIR / filename).resolve()
-
-    if video_path.parent != UPLOAD_DIR.resolve():
-        raise HTTPException(status_code=400, detail="Invalid filename")
-
-    if not video_path.is_file():
-        raise HTTPException(status_code=404, detail="Video not found")
+    video_path = get_video_path(filename)
 
     try:
-        result = analyze_video(str(video_path))
-
-        return {"success": True, "analysis": result}
-
+        return {
+            "success": True,
+            "analysis": analyze_video(str(video_path)),
+        }
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
 
 
 @router.get("/transcribe/{filename}")
 async def transcribe_uploaded_video(filename: str):
-
-    video_path = (UPLOAD_DIR / filename).resolve()
-
-    if video_path.parent != UPLOAD_DIR.resolve():
-        raise HTTPException(status_code=400, detail="Invalid filename")
-
-    if not video_path.is_file():
-        raise HTTPException(status_code=404, detail="Video not found")
+    video_path = get_video_path(filename)
 
     try:
-        result = transcribe_video(str(video_path))
-
-        return result
-
+        return transcribe_video(str(video_path))
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
 
 
 @router.get("/find-moments/{filename}")
 async def find_moments(filename: str, max_clips: int = 12):
-
-    if max_clips < 1 or max_clips > 20:
+    if not 1 <= max_clips <= 20:
         raise HTTPException(
-            status_code=400, detail="max_clips must be between 1 and 20"
+            status_code=400,
+            detail="max_clips must be between 1 and 20",
         )
 
-    video_path = (UPLOAD_DIR / filename).resolve()
-
-    if video_path.parent != UPLOAD_DIR.resolve():
-        raise HTTPException(status_code=400, detail="Invalid filename")
-
-    if not video_path.is_file():
-        raise HTTPException(status_code=404, detail="Video not found")
+    video_path = get_video_path(filename)
 
     try:
         transcript = transcribe_video(str(video_path))
+        analysis = find_viral_moments(
+            transcript["segments"],
+            max_clips=max_clips,
+        )
 
-        result = find_viral_moments(transcript["segments"], max_clips=max_clips)
-
-        return {"success": True, "language": transcript["language"], "analysis": result}
-
+        return {
+            "success": True,
+            "language": transcript["language"],
+            "analysis": analysis,
+        }
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
 
 
 @router.post("/generate-clip/{filename}")
 async def create_clip(
-    filename: str, start: float, end: float, keep_original_audio: bool = True
+    filename: str,
+    start: float,
+    end: float,
+    keep_original_audio: bool = True,
+    output_format: str = "landscape",
 ):
-    video_path = (UPLOAD_DIR / filename).resolve()
-
-    if video_path.parent != UPLOAD_DIR.resolve():
-        raise HTTPException(status_code=400, detail="Invalid filename")
-
-    if not video_path.is_file():
-        raise HTTPException(status_code=404, detail="Video not found")
+    validate_format(output_format)
+    video_path = get_video_path(filename)
 
     try:
-        result = generate_clip(
+        return generate_clip(
             video_path=video_path,
             start=start,
             end=end,
             keep_original_audio=keep_original_audio,
+            output_format=output_format,
         )
-        return result
-
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e))
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
 
@@ -162,19 +161,16 @@ async def create_multiple_clips(
     custom_duration: int = 30,
     min_duration: int = 15,
     max_duration: int = 60,
+    output_format: str = "landscape",
 ):
-    if max_clips < 1 or max_clips > 20:
+    if not 1 <= max_clips <= 20:
         raise HTTPException(
-            status_code=400, detail="max_clips must be between 1 and 20"
+            status_code=400,
+            detail="max_clips must be between 1 and 20",
         )
 
-    video_path = (UPLOAD_DIR / filename).resolve()
-
-    if video_path.parent != UPLOAD_DIR.resolve():
-        raise HTTPException(status_code=400, detail="Invalid filename")
-
-    if not video_path.is_file():
-        raise HTTPException(status_code=404, detail="Video not found")
+    validate_format(output_format)
+    video_path = get_video_path(filename)
 
     try:
         transcript = transcribe_video(str(video_path))
@@ -188,7 +184,7 @@ async def create_multiple_clips(
             max_duration=max_duration,
         )
 
-        generated_clips = []
+        clips = []
 
         for moment in analysis["moments"]:
             clip = generate_clip(
@@ -196,19 +192,27 @@ async def create_multiple_clips(
                 start=moment["start"],
                 end=moment["end"],
                 keep_original_audio=keep_original_audio,
+                output_format=output_format,
             )
 
-            generated_clips.append(
-                {**clip, "score": moment["score"], "text": moment["text"]}
+            clips.append(
+                {
+                    **clip,
+                    "score": moment["score"],
+                    "text": moment["text"],
+                }
             )
 
         return {
             "success": True,
             "language": transcript["language"],
             "requested_clips": max_clips,
-            "generated_clips": len(generated_clips),
-            "clips": generated_clips,
+            "generated_clips": len(clips),
+            "output_format": output_format,
+            "clips": clips,
         }
 
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e))
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
